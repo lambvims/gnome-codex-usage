@@ -10,7 +10,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-const REFRESH_SECONDS = 2;
+const REFRESH_SECONDS = 1;
 const TICK_SECONDS = 1;
 const SCRIPT_PATH = `${GLib.get_home_dir()}/.local/bin/codex-usage-status`;
 const USAGE_URL = 'https://chatgpt.com/codex/settings/usage';

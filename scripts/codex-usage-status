@@ -2,6 +2,8 @@
 import argparse
 import json
 import os
+import selectors
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -13,6 +15,8 @@ SESSIONS_DIR = HOME / ".codex" / "sessions"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "codex-usage"
 CACHE_FILE = CACHE_DIR / "status.json"
 USAGE_URL = "https://chatgpt.com/codex/settings/usage"
+TAIL_BYTES = 1024 * 1024
+APP_SERVER_TIMEOUT_SECONDS = 15
 
 
 def iter_recent_session_files(limit=40):
@@ -63,53 +67,263 @@ def normalize_limit(raw):
     }
 
 
-def load_latest_usage():
+def normalize_api_limit(raw):
+    if not isinstance(raw, dict):
+        return None
+
+    used = clamp_percent(raw.get("usedPercent"))
+    if used is None:
+        return None
+
+    left = max(0, 100 - used)
+    return {
+        "used_percent": used,
+        "left_percent": left,
+        "window_minutes": raw.get("windowDurationMins"),
+        "resets_at": raw.get("resetsAt"),
+    }
+
+
+def normalize_api_snapshot(raw):
+    if not isinstance(raw, dict):
+        return None
+
+    primary = normalize_api_limit(raw.get("primary"))
+    secondary = normalize_api_limit(raw.get("secondary"))
+    if not primary and not secondary:
+        return None
+
+    now = int(time.time())
+    return {
+        "ok": True,
+        "source": "codex app-server account/rateLimits/read",
+        "seen_at": now,
+        "updated_at": now,
+        "primary": primary,
+        "secondary": secondary,
+        "credits": raw.get("credits"),
+        "individual_limit": raw.get("individualLimit"),
+        "plan_type": raw.get("planType"),
+        "rate_limit_reached_type": raw.get("rateLimitReachedType"),
+        "usage_url": USAGE_URL,
+    }
+
+
+def request_app_server_rate_limits(timeout=APP_SERVER_TIMEOUT_SECONDS):
+    requests = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "codex-usage-status",
+                    "title": None,
+                    "version": "0.1",
+                },
+                "capabilities": {
+                    "experimentalApi": True,
+                    "requestAttestation": False,
+                    "optOutNotificationMethods": [],
+                },
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "account/rateLimits/read",
+            "params": None,
+        },
+    ]
+
+    payload = "".join(json.dumps(req, separators=(",", ":")) + "\n" for req in requests)
+
+    process = None
+    stderr_lines = []
+
+    try:
+        process = subprocess.Popen(
+            ["codex", "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Failed to run codex app-server: {exc}") from exc
+
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+
+    process.stdin.write(payload)
+    process.stdin.flush()
+
+    response = None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    selector.register(process.stderr, selectors.EVENT_READ)
+
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            events = selector.select(timeout=max(0.1, min(0.5, deadline - time.time())))
+            if not events:
+                if process.poll() is not None:
+                    break
+                continue
+
+            for key, _mask in events:
+                line = key.fileobj.readline()
+                if not line:
+                    continue
+
+                if key.fileobj is process.stderr:
+                    stderr_lines.append(line.strip())
+                    continue
+
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if message.get("id") == 2:
+                    response = message
+                    raise StopIteration
+    except StopIteration:
+        pass
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    if response is None:
+        detail = stderr_lines[-1:] or ["no response"]
+        raise RuntimeError(f"Codex app-server did not return rate limits: {detail[0]}")
+
+    if "error" in response:
+        raise RuntimeError(f"Codex app-server rate limit error: {response['error']}")
+
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("Codex app-server returned an invalid rate limit payload")
+
+    by_limit = result.get("rateLimitsByLimitId")
+    if isinstance(by_limit, dict):
+        data = normalize_api_snapshot(by_limit.get("codex"))
+        if data:
+            data["rate_limit_reset_credits"] = result.get("rateLimitResetCredits")
+            return data
+
+    data = normalize_api_snapshot(result.get("rateLimits"))
+    if data:
+        data["rate_limit_reset_credits"] = result.get("rateLimitResetCredits")
+        return data
+
+    raise RuntimeError("Codex app-server returned no codex rate limit bucket")
+
+
+def usage_from_event(event, path):
+    rate_limits = event.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            rate_limits = payload.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return None
+
+    primary = normalize_limit(rate_limits.get("primary"))
+    secondary = normalize_limit(rate_limits.get("secondary"))
+    if not primary and not secondary:
+        return None
+
+    return {
+        "ok": True,
+        "source": str(path),
+        "seen_at": parse_ts(event.get("timestamp")),
+        "updated_at": int(time.time()),
+        "primary": primary,
+        "secondary": secondary,
+        "plan_type": rate_limits.get("plan_type"),
+        "rate_limit_reached_type": rate_limits.get("rate_limit_reached_type"),
+        "usage_url": USAGE_URL,
+    }
+
+
+def latest_usage_from_tail(path):
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - TAIL_BYTES))
+            raw = handle.read()
+    except OSError:
+        return None
+
+    for line in reversed(raw.decode("utf-8", errors="ignore").splitlines()):
+        if '"rate_limits"' not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        data = usage_from_event(event, path)
+        if data:
+            return data
+
+    return None
+
+
+def latest_usage_from_full_file(path):
+    latest = None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if '"rate_limits"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                data = usage_from_event(event, path)
+                if data and (latest is None or data["seen_at"] >= latest["seen_at"]):
+                    latest = data
+    except OSError:
+        return None
+
+    return latest
+
+
+def load_latest_local_usage():
     latest = None
 
     for path in iter_recent_session_files():
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if '"rate_limits"' not in line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    rate_limits = event.get("rate_limits")
-                    if not isinstance(rate_limits, dict):
-                        payload = event.get("payload")
-                        if isinstance(payload, dict):
-                            rate_limits = payload.get("rate_limits")
-                    if not isinstance(rate_limits, dict):
-                        continue
-
-                    primary = normalize_limit(rate_limits.get("primary"))
-                    secondary = normalize_limit(rate_limits.get("secondary"))
-                    if not primary and not secondary:
-                        continue
-
-                    seen_at = parse_ts(event.get("timestamp"))
-                    if latest is None or seen_at >= latest["seen_at"]:
-                        latest = {
-                            "ok": True,
-                            "source": str(path),
-                            "seen_at": seen_at,
-                            "updated_at": int(time.time()),
-                            "primary": primary,
-                            "secondary": secondary,
-                            "plan_type": rate_limits.get("plan_type"),
-                            "rate_limit_reached_type": rate_limits.get("rate_limit_reached_type"),
-                            "usage_url": USAGE_URL,
-                        }
-        except OSError:
-            continue
+        data = latest_usage_from_tail(path) or latest_usage_from_full_file(path)
+        if data and (latest is None or data["seen_at"] >= latest["seen_at"]):
+            latest = data
 
     if latest is None:
         raise RuntimeError(f"No Codex rate_limits entries found in {SESSIONS_DIR}")
 
     return latest
+
+
+def load_latest_usage(source="auto"):
+    if source in ("auto", "api"):
+        try:
+            return request_app_server_rate_limits()
+        except Exception:
+            if source == "api":
+                raise
+
+    return load_latest_local_usage()
 
 
 def read_cache():
@@ -185,10 +399,16 @@ def main():
         default="zh",
         help="display language for text fields",
     )
+    parser.add_argument(
+        "--source",
+        choices=("auto", "api", "local"),
+        default="auto",
+        help="usage source: api uses Codex app-server; local reads session JSONL; auto tries api then local",
+    )
     args = parser.parse_args()
 
     try:
-        data = enrich(load_latest_usage(), lang=args.lang)
+        data = enrich(load_latest_usage(source=args.source), lang=args.lang)
         write_cache(data)
     except Exception as exc:
         cached = read_cache()

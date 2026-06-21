@@ -2,10 +2,14 @@
 
 Show local Codex usage in the GNOME Shell top bar.
 
-The extension reads the latest `rate_limits` event from local Codex session logs
-under `~/.codex/sessions`, then shows remaining 5-hour and weekly quota in the
-panel. It refreshes the local usage source every 2 seconds and updates reset
-countdowns in the menu and hover details every second.
+The extension calls Codex's local app-server protocol
+(`account/rateLimits/read`) to read current account limits, then shows remaining
+5-hour and weekly quota in the panel. If the app-server call fails, it falls
+back to the latest local `rate_limits` event under `~/.codex/sessions`.
+
+The panel refreshes every 1 second. Because the app-server request can take a
+few seconds, the extension skips overlapping refreshes and updates as soon as
+the current request returns.
 
 The panel text defaults to Chinese:
 
@@ -54,6 +58,8 @@ zip -r ../../codex-usage@local.shell-extension.zip .
 ./scripts/codex-usage-status --json
 ./scripts/codex-usage-status
 ./scripts/codex-usage-status --lang en
+./scripts/codex-usage-status --source api
+./scripts/codex-usage-status --source local
 ```
 
 The script caches the last good result in:
