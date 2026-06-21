@@ -129,41 +129,47 @@ def write_cache(data):
         pass
 
 
-def format_reset(ts, weekly=False):
+def format_reset(ts, weekly=False, lang="zh"):
     if not ts:
-        return "unknown"
+        return "未知" if lang == "zh" else "unknown"
     dt = datetime.fromtimestamp(int(ts))
+    if lang == "zh":
+        if weekly:
+            return dt.strftime("%m月%d日 %H:%M")
+        return dt.strftime("%H:%M")
     if weekly:
         return dt.strftime("%H:%M on %d %b")
     return dt.strftime("%H:%M")
 
 
-def format_text(data):
+def format_text(data, lang="zh"):
     primary = data.get("primary") or {}
     secondary = data.get("secondary") or {}
     p_left = primary.get("left_percent")
     s_left = secondary.get("left_percent")
 
     if p_left is None and s_left is None:
-        return "Codex usage ?"
+        return "Codex 用量 ?" if lang == "zh" else "Codex usage ?"
     if p_left is None:
-        return f"Codex W {s_left}%"
+        return f"Codex 周 {s_left}%" if lang == "zh" else f"Codex W {s_left}%"
     if s_left is None:
         return f"Codex 5h {p_left}%"
+    if lang == "zh":
+        return f"Codex 5h {p_left}% · 周 {s_left}%"
     return f"Codex 5h {p_left}% · W {s_left}%"
 
 
-def enrich(data, stale=False, error=None):
+def enrich(data, stale=False, error=None, lang="zh"):
     data = dict(data)
     data["stale"] = stale
     data["error"] = error
-    data["text"] = format_text(data)
+    data["text"] = format_text(data, lang=lang)
 
     primary = data.get("primary") or {}
     secondary = data.get("secondary") or {}
     data["details"] = {
-        "primary_reset": format_reset(primary.get("resets_at")),
-        "secondary_reset": format_reset(secondary.get("resets_at"), weekly=True),
+        "primary_reset": format_reset(primary.get("resets_at"), lang=lang),
+        "secondary_reset": format_reset(secondary.get("resets_at"), weekly=True, lang=lang),
     }
     return data
 
@@ -171,21 +177,27 @@ def enrich(data, stale=False, error=None):
 def main():
     parser = argparse.ArgumentParser(description="Read local Codex usage status.")
     parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.add_argument(
+        "--lang",
+        choices=("zh", "en"),
+        default="zh",
+        help="display language for text fields",
+    )
     args = parser.parse_args()
 
     try:
-        data = enrich(load_latest_usage())
+        data = enrich(load_latest_usage(), lang=args.lang)
         write_cache(data)
     except Exception as exc:
         cached = read_cache()
         if cached:
-            data = enrich(cached, stale=True, error=str(exc))
+            data = enrich(cached, stale=True, error=str(exc), lang=args.lang)
         else:
             data = {
                 "ok": False,
                 "stale": False,
                 "error": str(exc),
-                "text": "Codex usage ?",
+                "text": "Codex 用量 ?" if args.lang == "zh" else "Codex usage ?",
                 "usage_url": USAGE_URL,
             }
 
@@ -199,4 +211,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -4,7 +4,21 @@ Show local Codex usage in the GNOME Shell top bar.
 
 The extension reads the latest `rate_limits` event from local Codex session logs
 under `~/.codex/sessions`, then shows remaining 5-hour and weekly quota in the
-panel.
+panel. It refreshes the local usage source every 10 seconds and updates reset
+countdowns in the menu every second.
+
+The panel text defaults to Chinese:
+
+```text
+Codex 5h 90% · 周 20%
+```
+
+Use the menu item `切换到 English` / `切换到中文` to switch display language. The
+choice is saved in:
+
+```text
+~/.config/codex-usage/preferences.json
+```
 
 ## Local Install
 
@@ -35,6 +49,7 @@ zip -r ../../codex-usage@local.shell-extension.zip .
 ```bash
 ./scripts/codex-usage-status --json
 ./scripts/codex-usage-status
+./scripts/codex-usage-status --lang en
 ```
 
 The script caches the last good result in:

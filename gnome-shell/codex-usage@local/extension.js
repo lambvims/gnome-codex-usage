@@ -10,38 +10,145 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-const REFRESH_SECONDS = 180;
+const REFRESH_SECONDS = 10;
+const TICK_SECONDS = 1;
 const SCRIPT_PATH = `${GLib.get_home_dir()}/.local/bin/codex-usage-status`;
 const USAGE_URL = 'https://chatgpt.com/codex/settings/usage';
+const CONFIG_DIR = `${GLib.get_user_config_dir()}/codex-usage`;
+const CONFIG_PATH = `${CONFIG_DIR}/preferences.json`;
 
-function formatTimestamp(epochSeconds) {
+const STRINGS = {
+    zh: {
+        title: 'Codex 用量',
+        usageUnknown: 'Codex 用量 ?',
+        unknown: '未知',
+        primaryLimit: '5小时额度',
+        weeklyLimit: '每周额度',
+        resets: '重置',
+        lastUpdated: '最后更新',
+        fresh: '实时',
+        stale: '缓存',
+        failed: '失败',
+        refreshNow: '立即刷新',
+        openUsagePage: '打开用量页面',
+        switchLanguage: '切换到 English',
+        refreshEvery: '刷新间隔',
+        seconds: '秒',
+        left: '剩余',
+        weekShort: '周',
+        resetting: '正在重置',
+        inPrefix: '还有',
+        days: '天',
+        hours: '小时',
+        minutes: '分',
+        lessThanMinute: '不到1分钟',
+        usageScriptFailed: '用量脚本失败',
+        missing: '缺少',
+    },
+    en: {
+        title: 'Codex Usage',
+        usageUnknown: 'Codex usage ?',
+        unknown: 'unknown',
+        primaryLimit: '5h limit',
+        weeklyLimit: 'Weekly limit',
+        resets: 'Resets',
+        lastUpdated: 'Last updated',
+        fresh: 'live',
+        stale: 'cached',
+        failed: 'failed',
+        refreshNow: 'Refresh now',
+        openUsagePage: 'Open usage page',
+        switchLanguage: '切换到中文',
+        refreshEvery: 'Refresh every',
+        seconds: 'seconds',
+        left: 'left',
+        weekShort: 'W',
+        resetting: 'resetting',
+        inPrefix: 'in',
+        days: 'd',
+        hours: 'h',
+        minutes: 'm',
+        lessThanMinute: '<1m',
+        usageScriptFailed: 'usage script failed',
+        missing: 'Missing',
+    },
+};
+
+function loadLanguage() {
+    try {
+        const [ok, contents] = GLib.file_get_contents(CONFIG_PATH);
+        if (!ok)
+            return 'zh';
+
+        const prefs = JSON.parse(new TextDecoder().decode(contents));
+        return prefs.language === 'en' ? 'en' : 'zh';
+    } catch (_e) {
+        return 'zh';
+    }
+}
+
+function saveLanguage(language) {
+    try {
+        GLib.mkdir_with_parents(CONFIG_DIR, 0o700);
+        GLib.file_set_contents(CONFIG_PATH, JSON.stringify({language}, null, 2));
+    } catch (_e) {
+        // The selected language still applies for this Shell session.
+    }
+}
+
+function formatTimestamp(epochSeconds, strings) {
     if (!epochSeconds)
-        return _('unknown');
+        return strings.unknown;
 
     try {
         return GLib.DateTime.new_from_unix_local(epochSeconds).format('%H:%M:%S');
     } catch (_e) {
-        return _('unknown');
+        return strings.unknown;
     }
 }
 
-function formatReset(epochSeconds, weekly = false) {
+function formatReset(epochSeconds, weekly, language, strings) {
     if (!epochSeconds)
-        return _('unknown');
+        return strings.unknown;
 
     try {
         const dt = GLib.DateTime.new_from_unix_local(epochSeconds);
+        if (language === 'zh')
+            return weekly ? dt.format('%m月%d日 %H:%M') : dt.format('%H:%M');
+
         return weekly ? dt.format('%H:%M on %d %b') : dt.format('%H:%M');
     } catch (_e) {
-        return _('unknown');
+        return strings.unknown;
     }
 }
 
-function percentText(limit) {
-    if (!limit || limit.left_percent === undefined || limit.left_percent === null)
-        return _('unknown');
+function formatCountdown(epochSeconds, strings) {
+    if (!epochSeconds)
+        return strings.unknown;
 
-    return `${limit.left_percent}% left`;
+    const remaining = Math.max(0, epochSeconds - Math.floor(Date.now() / 1000));
+    if (remaining <= 0)
+        return strings.resetting;
+
+    const days = Math.floor(remaining / 86400);
+    const hours = Math.floor((remaining % 86400) / 3600);
+    const minutes = Math.floor((remaining % 3600) / 60);
+
+    if (days > 0)
+        return `${strings.inPrefix} ${days}${strings.days} ${hours}${strings.hours}`;
+    if (hours > 0)
+        return `${strings.inPrefix} ${hours}${strings.hours} ${minutes}${strings.minutes}`;
+    if (minutes > 0)
+        return `${strings.inPrefix} ${minutes}${strings.minutes}`;
+
+    return `${strings.inPrefix} ${strings.lessThanMinute}`;
+}
+
+function percentText(limit, strings) {
+    if (!limit || limit.left_percent === undefined || limit.left_percent === null)
+        return strings.unknown;
+
+    return `${limit.left_percent}% ${strings.left}`;
 }
 
 const CodexUsageIndicator = GObject.registerClass(
@@ -50,34 +157,40 @@ class CodexUsageIndicator extends PanelMenu.Button {
         super._init(0.0, _('Codex Usage'));
 
         this._extension = extension;
+        this._language = loadLanguage();
         this._refreshTimeoutId = 0;
+        this._tickTimeoutId = 0;
         this._refreshing = false;
         this._lastData = null;
 
         this._label = new St.Label({
-            text: _('Codex usage ?'),
+            text: this._t('usageUnknown'),
             style_class: 'codex-usage-label',
             y_align: Clutter.ActorAlign.CENTER,
         });
         this.add_child(this._label);
 
-        this._primaryItem = new PopupMenu.PopupMenuItem(_('5h limit: unknown'), {
+        this._primaryItem = new PopupMenu.PopupMenuItem('', {
             reactive: false,
             can_focus: false,
         });
-        this._primaryResetItem = new PopupMenu.PopupMenuItem(_('Resets: unknown'), {
+        this._primaryResetItem = new PopupMenu.PopupMenuItem('', {
             reactive: false,
             can_focus: false,
         });
-        this._secondaryItem = new PopupMenu.PopupMenuItem(_('Weekly limit: unknown'), {
+        this._secondaryItem = new PopupMenu.PopupMenuItem('', {
             reactive: false,
             can_focus: false,
         });
-        this._secondaryResetItem = new PopupMenu.PopupMenuItem(_('Resets: unknown'), {
+        this._secondaryResetItem = new PopupMenu.PopupMenuItem('', {
             reactive: false,
             can_focus: false,
         });
-        this._updatedItem = new PopupMenu.PopupMenuItem(_('Last updated: never'), {
+        this._updatedItem = new PopupMenu.PopupMenuItem('', {
+            reactive: false,
+            can_focus: false,
+        });
+        this._refreshIntervalItem = new PopupMenu.PopupMenuItem('', {
             reactive: false,
             can_focus: false,
         });
@@ -89,20 +202,27 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._secondaryResetItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this.menu.addMenuItem(this._updatedItem);
+        this.menu.addMenuItem(this._refreshIntervalItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        const refreshItem = new PopupMenu.PopupMenuItem(_('Refresh now'));
-        refreshItem.connect('activate', () => this.refresh());
-        this.menu.addMenuItem(refreshItem);
+        this._refreshItem = new PopupMenu.PopupMenuItem('');
+        this._refreshItem.connect('activate', () => this.refresh());
+        this.menu.addMenuItem(this._refreshItem);
 
-        const openItem = new PopupMenu.PopupMenuItem(_('Open usage page'));
-        openItem.connect('activate', () => {
+        this._languageItem = new PopupMenu.PopupMenuItem('');
+        this._languageItem.connect('activate', () => this._toggleLanguage());
+        this.menu.addMenuItem(this._languageItem);
+
+        this._openItem = new PopupMenu.PopupMenuItem('');
+        this._openItem.connect('activate', () => {
             Gio.AppInfo.launch_default_for_uri(USAGE_URL, global.create_app_launch_context(0, -1));
         });
-        this.menu.addMenuItem(openItem);
+        this.menu.addMenuItem(this._openItem);
 
+        this._updateMenuLabels();
         this.refresh();
         this._scheduleRefresh();
+        this._scheduleTick();
     }
 
     destroy() {
@@ -110,8 +230,16 @@ class CodexUsageIndicator extends PanelMenu.Button {
             GLib.Source.remove(this._refreshTimeoutId);
             this._refreshTimeoutId = 0;
         }
+        if (this._tickTimeoutId) {
+            GLib.Source.remove(this._tickTimeoutId);
+            this._tickTimeoutId = 0;
+        }
 
         super.destroy();
+    }
+
+    _t(key) {
+        return STRINGS[this._language][key];
     }
 
     _scheduleRefresh() {
@@ -128,6 +256,26 @@ class CodexUsageIndicator extends PanelMenu.Button {
         );
     }
 
+    _scheduleTick() {
+        if (this._tickTimeoutId)
+            GLib.Source.remove(this._tickTimeoutId);
+
+        this._tickTimeoutId = GLib.timeout_add_seconds(
+            GLib.PRIORITY_DEFAULT,
+            TICK_SECONDS,
+            () => {
+                this._updateMenuLabels();
+                return GLib.SOURCE_CONTINUE;
+            }
+        );
+    }
+
+    _toggleLanguage() {
+        this._language = this._language === 'zh' ? 'en' : 'zh';
+        saveLanguage(this._language);
+        this._updateDisplay();
+    }
+
     refresh() {
         if (this._refreshing)
             return;
@@ -136,7 +284,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
         const file = Gio.File.new_for_path(SCRIPT_PATH);
         if (!file.query_exists(null)) {
-            this._applyError(`Missing ${SCRIPT_PATH}`);
+            this._applyError(`${this._t('missing')} ${SCRIPT_PATH}`);
             this._refreshing = false;
             return;
         }
@@ -150,7 +298,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
             try {
                 const [, stdout, stderr] = process.communicate_utf8_finish(result);
                 if (!process.get_successful()) {
-                    this._applyError((stderr || stdout || _('usage script failed')).trim());
+                    this._applyError((stderr || stdout || this._t('usageScriptFailed')).trim());
                     return;
                 }
 
@@ -165,8 +313,18 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
     _applyData(data) {
         this._lastData = data;
+        this._updateDisplay();
+    }
 
-        this._label.text = data.text || _('Codex usage ?');
+    _updateDisplay() {
+        const data = this._lastData;
+        if (!data) {
+            this._label.text = this._t('usageUnknown');
+            this._updateMenuLabels();
+            return;
+        }
+
+        this._label.text = this._formatPanelText(data);
         this._label.remove_style_class_name('codex-usage-error');
         this._label.remove_style_class_name('codex-usage-stale');
 
@@ -175,16 +333,42 @@ class CodexUsageIndicator extends PanelMenu.Button {
         else if (data.stale)
             this._label.add_style_class_name('codex-usage-stale');
 
+        this._updateMenuLabels();
+    }
+
+    _formatPanelText(data) {
+        const primary = data.primary || {};
+        const secondary = data.secondary || {};
+        const pLeft = primary.left_percent;
+        const sLeft = secondary.left_percent;
+
+        if (pLeft === undefined && sLeft === undefined)
+            return this._t('usageUnknown');
+        if (pLeft === undefined)
+            return `Codex ${this._t('weekShort')} ${sLeft}%`;
+        if (sLeft === undefined)
+            return `Codex 5h ${pLeft}%`;
+
+        return `Codex 5h ${pLeft}% · ${this._t('weekShort')} ${sLeft}%`;
+    }
+
+    _updateMenuLabels() {
+        const strings = STRINGS[this._language];
+        const data = this._lastData || {};
         const primary = data.primary || null;
         const secondary = data.secondary || null;
 
-        this._primaryItem.label.text = `5h limit: ${percentText(primary)}`;
-        this._primaryResetItem.label.text = `Resets: ${formatReset(primary?.resets_at)}`;
-        this._secondaryItem.label.text = `Weekly limit: ${percentText(secondary)}`;
-        this._secondaryResetItem.label.text = `Resets: ${formatReset(secondary?.resets_at, true)}`;
+        this._primaryItem.label.text = `${strings.primaryLimit}: ${percentText(primary, strings)}`;
+        this._primaryResetItem.label.text = `${strings.resets}: ${formatReset(primary?.resets_at, false, this._language, strings)} (${formatCountdown(primary?.resets_at, strings)})`;
+        this._secondaryItem.label.text = `${strings.weeklyLimit}: ${percentText(secondary, strings)}`;
+        this._secondaryResetItem.label.text = `${strings.resets}: ${formatReset(secondary?.resets_at, true, this._language, strings)} (${formatCountdown(secondary?.resets_at, strings)})`;
 
-        const status = data.stale ? _('stale') : _('fresh');
-        this._updatedItem.label.text = `Last updated: ${formatTimestamp(data.updated_at)} (${status})`;
+        const status = data.stale ? strings.stale : strings.fresh;
+        this._updatedItem.label.text = `${strings.lastUpdated}: ${formatTimestamp(data.updated_at, strings)} (${status})`;
+        this._refreshIntervalItem.label.text = `${strings.refreshEvery}: ${REFRESH_SECONDS}${strings.seconds}`;
+        this._refreshItem.label.text = strings.refreshNow;
+        this._languageItem.label.text = strings.switchLanguage;
+        this._openItem.label.text = strings.openUsagePage;
     }
 
     _applyError(message) {
@@ -194,10 +378,11 @@ class CodexUsageIndicator extends PanelMenu.Button {
             return;
         }
 
-        this._label.text = _('Codex usage ?');
+        this._label.text = this._t('usageUnknown');
         this._label.remove_style_class_name('codex-usage-stale');
         this._label.add_style_class_name('codex-usage-error');
-        this._updatedItem.label.text = `Last updated: failed (${message})`;
+        this._updateMenuLabels();
+        this._updatedItem.label.text = `${this._t('lastUpdated')}: ${this._t('failed')} (${message})`;
     }
 });
 
