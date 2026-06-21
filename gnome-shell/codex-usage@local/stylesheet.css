@@ -1,0 +1,16 @@
+.codex-usage-label {
+    padding: 0 6px;
+}
+
+.codex-usage-stale {
+    color: #f6d365;
+}
+
+.codex-usage-error {
+    color: #ff8a80;
+}
+
+.codex-usage-menu-detail {
+    color: #c8c8c8;
+}
+

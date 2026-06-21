@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+HOME = Path.home()
+SESSIONS_DIR = HOME / ".codex" / "sessions"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "codex-usage"
+CACHE_FILE = CACHE_DIR / "status.json"
+USAGE_URL = "https://chatgpt.com/codex/settings/usage"
+
+
+def iter_recent_session_files(limit=40):
+    if not SESSIONS_DIR.exists():
+        return []
+
+    files = []
+    for path in SESSIONS_DIR.rglob("*.jsonl"):
+        try:
+            files.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+
+    files.sort(reverse=True)
+    return [path for _, path in files[:limit]]
+
+
+def parse_ts(value):
+    if not value:
+        return 0
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return 0
+
+
+def clamp_percent(value):
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_limit(raw):
+    if not isinstance(raw, dict):
+        return None
+
+    used = clamp_percent(raw.get("used_percent"))
+    if used is None:
+        return None
+
+    left = max(0, 100 - used)
+    return {
+        "used_percent": used,
+        "left_percent": left,
+        "window_minutes": raw.get("window_minutes"),
+        "resets_at": raw.get("resets_at"),
+    }
+
+
+def load_latest_usage():
+    latest = None
+
+    for path in iter_recent_session_files():
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if '"rate_limits"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    rate_limits = event.get("rate_limits")
+                    if not isinstance(rate_limits, dict):
+                        payload = event.get("payload")
+                        if isinstance(payload, dict):
+                            rate_limits = payload.get("rate_limits")
+                    if not isinstance(rate_limits, dict):
+                        continue
+
+                    primary = normalize_limit(rate_limits.get("primary"))
+                    secondary = normalize_limit(rate_limits.get("secondary"))
+                    if not primary and not secondary:
+                        continue
+
+                    seen_at = parse_ts(event.get("timestamp"))
+                    if latest is None or seen_at >= latest["seen_at"]:
+                        latest = {
+                            "ok": True,
+                            "source": str(path),
+                            "seen_at": seen_at,
+                            "updated_at": int(time.time()),
+                            "primary": primary,
+                            "secondary": secondary,
+                            "plan_type": rate_limits.get("plan_type"),
+                            "rate_limit_reached_type": rate_limits.get("rate_limit_reached_type"),
+                            "usage_url": USAGE_URL,
+                        }
+        except OSError:
+            continue
+
+    if latest is None:
+        raise RuntimeError(f"No Codex rate_limits entries found in {SESSIONS_DIR}")
+
+    return latest
+
+
+def read_cache():
+    try:
+        with CACHE_FILE.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_cache(data):
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with CACHE_FILE.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, sort_keys=True)
+    except OSError:
+        pass
+
+
+def format_reset(ts, weekly=False):
+    if not ts:
+        return "unknown"
+    dt = datetime.fromtimestamp(int(ts))
+    if weekly:
+        return dt.strftime("%H:%M on %d %b")
+    return dt.strftime("%H:%M")
+
+
+def format_text(data):
+    primary = data.get("primary") or {}
+    secondary = data.get("secondary") or {}
+    p_left = primary.get("left_percent")
+    s_left = secondary.get("left_percent")
+
+    if p_left is None and s_left is None:
+        return "Codex usage ?"
+    if p_left is None:
+        return f"Codex W {s_left}%"
+    if s_left is None:
+        return f"Codex 5h {p_left}%"
+    return f"Codex 5h {p_left}% · W {s_left}%"
+
+
+def enrich(data, stale=False, error=None):
+    data = dict(data)
+    data["stale"] = stale
+    data["error"] = error
+    data["text"] = format_text(data)
+
+    primary = data.get("primary") or {}
+    secondary = data.get("secondary") or {}
+    data["details"] = {
+        "primary_reset": format_reset(primary.get("resets_at")),
+        "secondary_reset": format_reset(secondary.get("resets_at"), weekly=True),
+    }
+    return data
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Read local Codex usage status.")
+    parser.add_argument("--json", action="store_true", help="print JSON")
+    args = parser.parse_args()
+
+    try:
+        data = enrich(load_latest_usage())
+        write_cache(data)
+    except Exception as exc:
+        cached = read_cache()
+        if cached:
+            data = enrich(cached, stale=True, error=str(exc))
+        else:
+            data = {
+                "ok": False,
+                "stale": False,
+                "error": str(exc),
+                "text": "Codex usage ?",
+                "usage_url": USAGE_URL,
+            }
+
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, sort_keys=True))
+    else:
+        print(data.get("text", "Codex usage ?"))
+
+    return 0 if data.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+

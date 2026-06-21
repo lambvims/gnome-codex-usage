@@ -1,0 +1,14 @@
+{
+  "uuid": "codex-usage@local",
+  "name": "Codex Usage",
+  "description": "Show local Codex rate limit usage in the GNOME Shell top bar.",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48"
+  ],
+  "version": 1,
+  "url": "https://chatgpt.com/codex/settings/usage"
+}
+

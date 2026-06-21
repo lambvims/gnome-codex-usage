@@ -1,0 +1,5 @@
+.cache/
+__pycache__/
+*.zip
+*.tar.gz
+*.log
