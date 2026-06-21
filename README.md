@@ -75,3 +75,9 @@ gnome-shell/codex-usage@local/  GNOME Shell extension
 scripts/codex-usage-status      Local Codex usage parser
 install.sh                      Local installer
 ```
+
+## Images
+
+![](/home/lambvims/.config/marktext/images/2026-06-21-18-50-27-截图%202026-06-21%2018-47-45.png)
+
+![](/home/lambvims/.config/marktext/images/2026-06-21-18-49-42-image.png)
