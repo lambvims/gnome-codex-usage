@@ -23,6 +23,10 @@ choice is saved in:
 ```text
 ~/.config/codex-usage/preferences.json
 ```
+## Instructions
+
+You are required to complete the installation of Codex Desktop for Linux as a prerequisite step.
+Project repository link: https://github.com/ilysenko/codex-desktop-linux
 
 ## Local Install
 
