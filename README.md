@@ -4,13 +4,13 @@ Show local Codex usage in the GNOME Shell top bar.
 
 The extension reads the latest `rate_limits` event from local Codex session logs
 under `~/.codex/sessions`, then shows remaining 5-hour and weekly quota in the
-panel. It refreshes the local usage source every 10 seconds and updates reset
-countdowns in the menu every second.
+panel. It refreshes the local usage source every 2 seconds and updates reset
+countdowns in the menu and hover details every second.
 
 The panel text defaults to Chinese:
 
 ```text
-Codex 5h 90% · 周 20%
+Codex 5时 90% · 周 20%
 ```
 
 Use the menu item `切换到 English` / `切换到中文` to switch display language. The
@@ -34,6 +34,10 @@ and back in is the reliable reload path.
 On Wayland, a newly installed extension may not appear in `gnome-extensions
 list` until the next login because the running Shell process has not rescanned
 the extensions directory yet.
+
+When changing `extension.js`, `gnome-extensions disable/enable` may keep using
+GNOME Shell's cached module. If `gnome-extensions info codex-usage@local` shows
+an old version after install, log out and back in to force a clean reload.
 
 ## Manual Package
 

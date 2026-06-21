@@ -153,9 +153,11 @@ def format_text(data, lang="zh"):
     if p_left is None:
         return f"Codex 周 {s_left}%" if lang == "zh" else f"Codex W {s_left}%"
     if s_left is None:
+        if lang == "zh":
+            return f"Codex 5时 {p_left}%"
         return f"Codex 5h {p_left}%"
     if lang == "zh":
-        return f"Codex 5h {p_left}% · 周 {s_left}%"
+        return f"Codex 5时 {p_left}% · 周 {s_left}%"
     return f"Codex 5h {p_left}% · W {s_left}%"
 
 

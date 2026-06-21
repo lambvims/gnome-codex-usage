@@ -10,7 +10,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-const REFRESH_SECONDS = 10;
+const REFRESH_SECONDS = 2;
 const TICK_SECONDS = 1;
 const SCRIPT_PATH = `${GLib.get_home_dir()}/.local/bin/codex-usage-status`;
 const USAGE_URL = 'https://chatgpt.com/codex/settings/usage';
@@ -32,6 +32,7 @@ const STRINGS = {
         refreshNow: '立即刷新',
         openUsagePage: '打开用量页面',
         switchLanguage: '切换到 English',
+        language: '语言',
         refreshEvery: '刷新间隔',
         seconds: '秒',
         left: '剩余',
@@ -42,6 +43,7 @@ const STRINGS = {
         hours: '小时',
         minutes: '分',
         lessThanMinute: '不到1分钟',
+        lastEvent: '最后事件',
         usageScriptFailed: '用量脚本失败',
         missing: '缺少',
     },
@@ -59,6 +61,7 @@ const STRINGS = {
         refreshNow: 'Refresh now',
         openUsagePage: 'Open usage page',
         switchLanguage: '切换到中文',
+        language: 'Language',
         refreshEvery: 'Refresh every',
         seconds: 'seconds',
         left: 'left',
@@ -69,6 +72,7 @@ const STRINGS = {
         hours: 'h',
         minutes: 'm',
         lessThanMinute: '<1m',
+        lastEvent: 'Last event',
         usageScriptFailed: 'usage script failed',
         missing: 'Missing',
     },
@@ -162,6 +166,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._tickTimeoutId = 0;
         this._refreshing = false;
         this._lastData = null;
+        this._signalConnections = [];
 
         this._label = new St.Label({
             text: this._t('usageUnknown'),
@@ -190,7 +195,15 @@ class CodexUsageIndicator extends PanelMenu.Button {
             reactive: false,
             can_focus: false,
         });
+        this._eventItem = new PopupMenu.PopupMenuItem('', {
+            reactive: false,
+            can_focus: false,
+        });
         this._refreshIntervalItem = new PopupMenu.PopupMenuItem('', {
+            reactive: false,
+            can_focus: false,
+        });
+        this._languageStatusItem = new PopupMenu.PopupMenuItem('', {
             reactive: false,
             can_focus: false,
         });
@@ -202,7 +215,9 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._secondaryResetItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
         this.menu.addMenuItem(this._updatedItem);
+        this.menu.addMenuItem(this._eventItem);
         this.menu.addMenuItem(this._refreshIntervalItem);
+        this.menu.addMenuItem(this._languageStatusItem);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
         this._refreshItem = new PopupMenu.PopupMenuItem('');
@@ -219,6 +234,26 @@ class CodexUsageIndicator extends PanelMenu.Button {
         });
         this.menu.addMenuItem(this._openItem);
 
+        this._hoverLabel = new St.Label({
+            style_class: 'codex-usage-tooltip',
+            text: '',
+            visible: false,
+        });
+        Main.uiGroup.add_child(this._hoverLabel);
+
+        this._signalConnections.push([this, this.connect('enter-event', () => {
+            this._showHoverDetails();
+            return Clutter.EVENT_PROPAGATE;
+        })]);
+        this._signalConnections.push([this, this.connect('leave-event', () => {
+            this._hideHoverDetails();
+            return Clutter.EVENT_PROPAGATE;
+        })]);
+        this._signalConnections.push([this.menu, this.menu.connect('open-state-changed', (_menu, isOpen) => {
+            if (isOpen)
+                this._hideHoverDetails();
+        })]);
+
         this._updateMenuLabels();
         this.refresh();
         this._scheduleRefresh();
@@ -234,6 +269,11 @@ class CodexUsageIndicator extends PanelMenu.Button {
             GLib.Source.remove(this._tickTimeoutId);
             this._tickTimeoutId = 0;
         }
+        for (const [target, id] of this._signalConnections)
+            target.disconnect(id);
+        this._signalConnections = [];
+        this._hoverLabel?.destroy();
+        this._hoverLabel = null;
 
         super.destroy();
     }
@@ -274,6 +314,7 @@ class CodexUsageIndicator extends PanelMenu.Button {
         this._language = this._language === 'zh' ? 'en' : 'zh';
         saveLanguage(this._language);
         this._updateDisplay();
+        this._showHoverDetails();
     }
 
     refresh() {
@@ -347,7 +388,10 @@ class CodexUsageIndicator extends PanelMenu.Button {
         if (pLeft === undefined)
             return `Codex ${this._t('weekShort')} ${sLeft}%`;
         if (sLeft === undefined)
-            return `Codex 5h ${pLeft}%`;
+            return this._language === 'zh' ? `Codex 5时 ${pLeft}%` : `Codex 5h ${pLeft}%`;
+
+        if (this._language === 'zh')
+            return `Codex 5时 ${pLeft}% · ${this._t('weekShort')} ${sLeft}%`;
 
         return `Codex 5h ${pLeft}% · ${this._t('weekShort')} ${sLeft}%`;
     }
@@ -365,10 +409,77 @@ class CodexUsageIndicator extends PanelMenu.Button {
 
         const status = data.stale ? strings.stale : strings.fresh;
         this._updatedItem.label.text = `${strings.lastUpdated}: ${formatTimestamp(data.updated_at, strings)} (${status})`;
+        this._eventItem.label.text = `${strings.lastEvent}: ${formatTimestamp(data.seen_at, strings)}`;
         this._refreshIntervalItem.label.text = `${strings.refreshEvery}: ${REFRESH_SECONDS}${strings.seconds}`;
+        this._languageStatusItem.label.text = `${strings.language}: ${this._language === 'zh' ? '中文' : 'English'}`;
         this._refreshItem.label.text = strings.refreshNow;
         this._languageItem.label.text = strings.switchLanguage;
         this._openItem.label.text = strings.openUsagePage;
+
+        if (this._hoverLabel?.visible)
+            this._updateHoverDetails();
+    }
+
+    _detailText() {
+        const strings = STRINGS[this._language];
+        const data = this._lastData || {};
+        const primary = data.primary || null;
+        const secondary = data.secondary || null;
+        const status = data.stale ? strings.stale : strings.fresh;
+
+        if (this._language === 'zh') {
+            return [
+                strings.title,
+                `${strings.primaryLimit}: ${percentText(primary, strings)} / 已用 ${primary?.used_percent ?? strings.unknown}%`,
+                `${strings.resets}: ${formatReset(primary?.resets_at, false, this._language, strings)} (${formatCountdown(primary?.resets_at, strings)})`,
+                `${strings.weeklyLimit}: ${percentText(secondary, strings)} / 已用 ${secondary?.used_percent ?? strings.unknown}%`,
+                `${strings.resets}: ${formatReset(secondary?.resets_at, true, this._language, strings)} (${formatCountdown(secondary?.resets_at, strings)})`,
+                `${strings.lastEvent}: ${formatTimestamp(data.seen_at, strings)}`,
+                `${strings.lastUpdated}: ${formatTimestamp(data.updated_at, strings)} (${status})`,
+            ].join('\n');
+        }
+
+        return [
+            strings.title,
+            `${strings.primaryLimit}: ${percentText(primary, strings)} / used ${primary?.used_percent ?? strings.unknown}%`,
+            `${strings.resets}: ${formatReset(primary?.resets_at, false, this._language, strings)} (${formatCountdown(primary?.resets_at, strings)})`,
+            `${strings.weeklyLimit}: ${percentText(secondary, strings)} / used ${secondary?.used_percent ?? strings.unknown}%`,
+            `${strings.resets}: ${formatReset(secondary?.resets_at, true, this._language, strings)} (${formatCountdown(secondary?.resets_at, strings)})`,
+            `${strings.lastEvent}: ${formatTimestamp(data.seen_at, strings)}`,
+            `${strings.lastUpdated}: ${formatTimestamp(data.updated_at, strings)} (${status})`,
+        ].join('\n');
+    }
+
+    _showHoverDetails() {
+        if (!this._hoverLabel || this.menu.isOpen)
+            return;
+
+        this._updateHoverDetails();
+        this._hoverLabel.show();
+    }
+
+    _hideHoverDetails() {
+        this._hoverLabel?.hide();
+    }
+
+    _updateHoverDetails() {
+        if (!this._hoverLabel)
+            return;
+
+        this._hoverLabel.text = this._detailText();
+
+        const [actorX, actorY] = this.get_transformed_position();
+        const [actorWidth, actorHeight] = this.get_transformed_size();
+        const [, tooltipWidth] = this._hoverLabel.get_preferred_width(-1);
+        const monitor = Main.layoutManager.primaryMonitor;
+        const margin = 8;
+
+        let tooltipX = Math.round(actorX + actorWidth / 2 - tooltipWidth / 2);
+        tooltipX = Math.max(monitor.x + margin, tooltipX);
+        tooltipX = Math.min(monitor.x + monitor.width - tooltipWidth - margin, tooltipX);
+
+        const tooltipY = Math.round(actorY + actorHeight + 6);
+        this._hoverLabel.set_position(tooltipX, tooltipY);
     }
 
     _applyError(message) {
