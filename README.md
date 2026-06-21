@@ -78,6 +78,6 @@ install.sh                      Local installer
 
 ## Screenshot
 
-![s1.png](/home/lambvims/CodeArt/codexusage/screenshot/s1.png)
+![s1.png](./screenshot/s1.png)
 
-![s2.png](/home/lambvims/CodeArt/codexusage/screenshot/s2.png)
+![s2.png](./screenshot/s2.png)
